@@ -49,11 +49,7 @@ class PriorityMemory:
     def GetBatch(self, batchSize):
         batch_memory = []
         ISWeights = []
-        if(False):
-            ISWeights = np.ones((batchSize, 1))
-            batch_memory = self.Memories.random_sample(batchSize)
-        else:
-            batch_memory, ISWeights = self.Memories.sample(batchSize)
+        batch_memory, ISWeights = self.Memories.sample(batchSize)
         return batch_memory, ISWeights
     
     def UpdateBatchPriorities(self, treeIndexes, loss):

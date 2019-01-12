@@ -11,6 +11,10 @@ import keras.backend as K
 from dqn_globals import DqnGlobals
 
 
+def weighted_is_loss(y_true, y_pred, is_weights):
+    hLoss = tf.losses.huber_loss(y_true, y_pred)
+    return K.mean(is_weights * hLoss)
+
 '''
  Based on agents from rlcode, keon, A.L.Ecoffet, Thomas Simonini,
  and probably several others
@@ -19,9 +23,9 @@ from dqn_globals import DqnGlobals
 class DqnAgent():
     def __init__(self, action_size, batchHelper):
         self.SetDefaultParameters(action_size, batchHelper)
-        self.model = self.BuildModel()
-        self.target_model = self.BuildModel()
-        self.LoadModelInfo()
+        self.online_training_model, self.online_predict_model = self.BuildModel()
+        _, self.target_predict_model = self.BuildModel()
+        #self.LoadModelInfo()
         self.UpdateTargetModel()
     
     def SetDefaultParameters(self, action_size, batchHelper):
@@ -33,7 +37,7 @@ class DqnAgent():
         self.epsilon_start = 1.0
         self.epsilon = self.epsilon_start
         self.epsilon_min = 0.05
-        self.epsilon_decay_step = 0.000005
+        self.epsilon_decay_step = 0.000002
                                   
         # parameters about training
         self._delayTraining = 20000
@@ -93,11 +97,23 @@ class DqnAgent():
         # We multiply the output by the mask!
         actions_input = keras.layers.Input((self.action_size,), name='mask')
         filtered_output = keras.layers.Multiply()([output, actions_input])
-            
-        result = keras.models.Model(inputs=[frames_input, actions_input], outputs=filtered_output)
+        
+        #  Prediction
+        prediction_model = keras.models.Model(
+                inputs=[frames_input, actions_input],
+                outputs=filtered_output)
+        
+        #  Training
+        is_weights = keras.layers.Input((1,), name='is_weights')
+        y_true = keras.layers.Input((self.action_size,), name='y_true')
+        training_model = keras.models.Model(
+                inputs=[frames_input, actions_input, is_weights, y_true], 
+                outputs=filtered_output)
+        training_model.add_loss(weighted_is_loss(y_true, filtered_output, is_weights))
         optimizer = Adam(lr=self.learning_rate)
-        result.compile(optimizer, loss=tf.losses.huber_loss)
-        return result
+        training_model.compile(optimizer, loss=None)
+        
+        return training_model, prediction_model
     
     # get action from model using epsilon-greedy policy
     def GetAction(self):
@@ -108,7 +124,7 @@ class DqnAgent():
             return random.randrange(self.action_size)
 
         curState = self.BatchHelper.GetCurrentState()
-        q_value = self.model.predict([curState, np.ones((1,self.action_size))])
+        q_value = self.online_predict_model.predict([curState, np.ones((1,self.action_size))])
         return np.argmax(q_value[0])
 
     def GetNoOpAction(self):
@@ -120,11 +136,11 @@ class DqnAgent():
     def LoadModelInfo(self):
         weightsFile = Path(self.SaveWeightsFilename)
         if(weightsFile.is_file()):
-            self.model.load_weights(self.SaveWeightsFilename)
+            self.online_training_model.load_weights(self.SaveWeightsFilename)
             print("*** Model Weights Loaded ***")
 
     def SaveModelInfo(self):
-        self.target_model.save_weights(self.SaveWeightsFilename)
+        self.target_predict_model.save_weights(self.SaveWeightsFilename)
     
     def UpdateAndSave(self):
         self.UpdateTargetModel()
@@ -142,9 +158,9 @@ class DqnAgent():
             self.UpdateAndSave()
 
     def UpdateTargetModel(self):
-        self.target_model.set_weights(self.model.get_weights())
+        self.target_predict_model.set_weights(self.online_training_model.get_weights())
 
-    def UpdateMemory(self, batchInfo, prevQ, nextQ):
+    def UpdatePriorities(self, batchInfo, prevQ, nextQ):
         delta = np.abs(nextQ - prevQ)
         self.BatchHelper.UpdateBatchPriorities(batchInfo, delta)
         
@@ -156,25 +172,25 @@ class DqnAgent():
         batchInfo = self.BatchHelper.GetBatch()
 
         # First, predict the Q values of the next states. Note how we are passing ones as the mask.
-        next_Q_values = self.target_model.predict([batchInfo.nextStates, np.ones(batchInfo.actions.shape)])
+        next_Q_values = self.target_predict_model.predict([batchInfo.nextStates, np.ones(batchInfo.actions.shape)])
         
         # The Q values of the terminal states is 0 by definition, so override them
         next_Q_values[batchInfo.gameOvers] = 0
         
         # The Q values of each start state is the reward + gamma * the max next state Q value
         Q_values = batchInfo.rewards + (self.gamma * np.max(next_Q_values, axis=1))
-
-        # Update priorities in memory
-        prev_Q_values = self.target_model.predict([batchInfo.startStates, np.ones(batchInfo.actions.shape)])
-        prev_Q_values = np.max(prev_Q_values, axis=1)
-        self.UpdateMemory(batchInfo, prev_Q_values, Q_values)
         
         # Fit the keras model. Note how we are passing the actions as the mask and multiplying
         # the targets by the actions.
-        self.model.fit(
-                x = [batchInfo.startStates, batchInfo.actions], 
-                y = batchInfo.actions * Q_values[:,None],
+        y_true = batchInfo.actions * Q_values[:,None]
+        self.online_training_model.fit(
+                x = [batchInfo.startStates, batchInfo.actions, batchInfo.ISWeights, y_true], 
                 epochs=1, 
                 batch_size=len(batchInfo.startStates), 
                 verbose=0
                 )
+
+        # Update priorities in memory
+        prev_Q_values = self.target_predict_model.predict([batchInfo.startStates, np.ones(batchInfo.actions.shape)])
+        prev_Q_values = np.max(prev_Q_values, axis=1)
+        self.UpdatePriorities(batchInfo, prev_Q_values, Q_values)

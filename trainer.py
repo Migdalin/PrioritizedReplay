@@ -101,8 +101,8 @@ def Main(whichGame):
     trainer.Run(whichGame)
 
 #cProfile.run("Main('PongDeterministic-v4')", "profilingResults.cprof")
-Main('PongDeterministic-v4')
-#Main('BreakoutDeterministic-v4')
+#Main('PongDeterministic-v4')
+Main('BreakoutDeterministic-v4')
 
 
 
